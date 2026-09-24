@@ -76,10 +76,20 @@ def asset_name(url: str) -> str:
 
 
 def release_assets(tag: str) -> dict[str, int] | None:
+    """Uploaded assets by name -> size. An asset left behind by an interrupted upload (state other
+    than "uploaded") is deleted here so the next upload can replace it; otherwise it would block
+    that file forever."""
     out = gh("release", "view", tag, "--repo", REPO, "--json", "assets", check=False)
     if not out.strip():
         return None
-    return {a["name"]: a["size"] for a in json.loads(out)["assets"]}
+    assets = {}
+    for a in json.loads(out)["assets"]:
+        if a.get("state", "uploaded") != "uploaded":
+            gh("release", "delete-asset", tag, a["name"], "--repo", REPO, "--yes")
+            print(f"deleted incomplete asset {tag}/{a['name']} (state {a.get('state')})")
+            continue
+        assets[a["name"]] = a["size"]
+    return assets
 
 
 def mirror_file(tag: str, f: dict, existing: dict[str, int]) -> bool:
