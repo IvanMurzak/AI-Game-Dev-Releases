@@ -1,15 +1,15 @@
 {
-  "committed_at": 1791899954,
+  "committed_at": 1791926431,
   "last_added": [
-    "v0.25.4/AI.Game.Dev.Setup.0.25.4.exe",
-    "v0.25.4/AI.Game.Dev-0.25.4-mac.zip",
-    "v0.25.4/AI.Game.Dev-0.25.4-arm64-mac.zip",
-    "v0.25.4/AI.Game.Dev-0.25.4.dmg",
-    "v0.25.4/AI.Game.Dev-0.25.4-arm64.dmg",
-    "v0.25.4/AI.Game.Dev-0.25.4-x86_64.AppImage",
-    "v0.25.4/AI.Game.Dev-0.25.4-amd64.deb"
+    "v0.25.5/AI.Game.Dev.Setup.0.25.5.exe",
+    "v0.25.5/AI.Game.Dev-0.25.5-mac.zip",
+    "v0.25.5/AI.Game.Dev-0.25.5-arm64-mac.zip",
+    "v0.25.5/AI.Game.Dev-0.25.5.dmg",
+    "v0.25.5/AI.Game.Dev-0.25.5-arm64.dmg",
+    "v0.25.5/AI.Game.Dev-0.25.5-x86_64.AppImage",
+    "v0.25.5/AI.Game.Dev-0.25.5-amd64.deb"
   ],
   "last_removed": [
-    "v0.24.0"
+    "v0.25.0"
   ]
 }
