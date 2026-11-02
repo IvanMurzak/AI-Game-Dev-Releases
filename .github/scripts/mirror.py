@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -29,6 +30,8 @@ KEEP_VERSIONS = int(os.environ.get("KEEP_VERSIONS", "5"))
 KEEPALIVE_DAYS = 30
 REPO = os.environ["GITHUB_REPOSITORY"]
 UA = {"User-Agent": "ai-game-dev-release-mirror"}
+DOWNLOAD_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 30
 
 
 def gh(*args: str, check: bool = True) -> str:
@@ -71,6 +74,10 @@ def parse_feed(text: str) -> tuple[str, list[dict]]:
     return version, files
 
 
+DOWNLOAD_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 30
+
+
 def asset_name(url: str) -> str:
     return url.replace(" ", ".")
 
@@ -92,6 +99,21 @@ def release_assets(tag: str) -> dict[str, int] | None:
     return assets
 
 
+def download(src: str, path: str, size: int, sha512: str) -> None:
+    """One whole download to path; a cut connection can end the body early without an error, so
+    the bytes are always checked here."""
+    h = hashlib.sha512()
+    n = 0
+    with urllib.request.urlopen(urllib.request.Request(src, headers=UA), timeout=600) as r, open(path, "wb") as out:
+        while chunk := r.read(1 << 20):
+            h.update(chunk)
+            n += len(chunk)
+            out.write(chunk)
+    digest = base64.b64encode(h.digest()).decode()
+    if n != size or digest != sha512:
+        raise RuntimeError(f"{src}: got {n} bytes sha512 {digest}, feed says {size} / {sha512}")
+
+
 def mirror_file(tag: str, f: dict, existing: dict[str, int]) -> bool:
     name = asset_name(f["url"])
     size = int(f["size"])
@@ -102,16 +124,15 @@ def mirror_file(tag: str, f: dict, existing: dict[str, int]) -> bool:
     src = f"{ORIGIN}/{urllib.parse.quote(f['url'])}"
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, name)
-        h = hashlib.sha512()
-        n = 0
-        with urllib.request.urlopen(urllib.request.Request(src, headers=UA), timeout=600) as r, open(path, "wb") as out:
-            while chunk := r.read(1 << 20):
-                h.update(chunk)
-                n += len(chunk)
-                out.write(chunk)
-        digest = base64.b64encode(h.digest()).decode()
-        if n != size or digest != f["sha512"]:
-            raise RuntimeError(f"{src}: got {n} bytes sha512 {digest}, feed says {size} / {f['sha512']}")
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            try:
+                download(src, path, size, f["sha512"])
+                break
+            except (OSError, http.client.HTTPException, RuntimeError) as error:
+                if attempt == DOWNLOAD_ATTEMPTS:
+                    raise
+                print(f"retrying {name} (attempt {attempt} of {DOWNLOAD_ATTEMPTS}): {error}")
+                time.sleep(RETRY_DELAY_SECONDS)
         gh("release", "upload", tag, path, "--repo", REPO)
     after = release_assets(tag) or {}
     if after.get(name) != size:
