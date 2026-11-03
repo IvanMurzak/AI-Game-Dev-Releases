@@ -27,9 +27,8 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    # The loop stops starting passes after LOOP_MINUTES; one pass that uploads a
-    # full release can take ~20 min, and the job must end before this timeout or
-    # it is cancelled and the next run is not dispatched.
+    # The loop starts no pass after LOOP_MINUTES and bounds each pass at 25 min:
+    # a job that hits this timeout is cancelled and dispatches no next run.
     timeout-minutes: 355
     env:
       GH_TOKEN: ${{ github.token }}
@@ -42,7 +41,8 @@ jobs:
 
       - name: Mirror in a loop
         run: |
-          set -uo pipefail
+          # Not -e: a failed pass is counted and retried, never ends the loop.
+          set +e -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           deadline=$(( SECONDS + LOOP_MINUTES * 60 ))
@@ -51,13 +51,14 @@ jobs:
           while :; do
             pass=$(( pass + 1 ))
             echo "::group::pass ${pass} ($(date -u +%H:%M:%SZ))"
-            if ! python3 .github/scripts/mirror.py; then
+            # A full release pass takes ~4 min; the bound keeps the last pass
+            # inside the job timeout, so the next run is always dispatched.
+            if ! timeout 25m python3 .github/scripts/mirror.py; then
               failures=$(( failures + 1 ))
               echo "::error::mirror pass ${pass} failed; retrying in ${INTERVAL_SECONDS}s"
             elif ! git diff --quiet -- mirrored.json; then
-              git add mirrored.json
-              git commit -q -m "mirror: update state"
-              if ! { git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}"; }; then
+              if ! { git add mirrored.json && git commit -q -m "mirror: update state" \
+                     && git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}"; }; then
                 failures=$(( failures + 1 ))
                 echo "::error::pushing mirrored.json failed in pass ${pass}"
                 git rebase --abort 2>/dev/null || true
