@@ -1,12 +1,24 @@
 name: Mirror builds
 
+# GitHub runs this repo's `*/5` schedule only every 2-10 hours, but the App
+# release waits at most ~45 min for the mirror. So a run polls for ~5.5 h, then
+# dispatches the next run (GITHUB_TOKEN may start workflow_dispatch runs); the
+# schedule only restarts a broken chain. A manual run queues behind a running
+# loop: to mirror right now, `gh run cancel <id>`, then `gh workflow run mirror.yml`.
+
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      loop_minutes:
+        description: "How long this run keeps polling (a test: 3)"
+        required: false
+        default: "320" # keep equal to the LOOP_MINUTES fallback below
 
 permissions:
   contents: write
+  actions: write # only to dispatch the next run of this workflow
 
 concurrency:
   group: mirror
@@ -15,17 +27,52 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The loop starts no pass after LOOP_MINUTES and bounds each pass at 25 min:
+    # a job that hits this timeout is cancelled and dispatches no next run.
+    timeout-minutes: 355
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LOOP_MINUTES: ${{ inputs.loop_minutes || '320' }}
+      INTERVAL_SECONDS: "120"
     steps:
       - uses: actions/checkout@v4
-      - id: mirror
-        run: python3 .github/scripts/mirror.py
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - if: steps.mirror.outputs.state_changed == 'true'
+        with:
+          fetch-depth: 0 # the loop rebases its state commits onto origin
+
+      - name: Mirror in a loop
         run: |
+          # Not -e: a failed pass is counted and retried, never ends the loop.
+          set +e -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add mirrored.json
-          git commit -m "mirror: update state"
-          git push
+          deadline=$(( SECONDS + LOOP_MINUTES * 60 ))
+          failures=0
+          pass=0
+          while :; do
+            pass=$(( pass + 1 ))
+            echo "::group::pass ${pass} ($(date -u +%H:%M:%SZ))"
+            # A full release pass takes ~4 min; the bound keeps the last pass
+            # inside the job timeout, so the next run is always dispatched.
+            if ! timeout 25m python3 .github/scripts/mirror.py; then
+              failures=$(( failures + 1 ))
+              echo "::error::mirror pass ${pass} failed; retrying in ${INTERVAL_SECONDS}s"
+            elif ! git diff --quiet -- mirrored.json; then
+              if ! { git add mirrored.json && git commit -q -m "mirror: update state" \
+                     && git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}"; }; then
+                failures=$(( failures + 1 ))
+                echo "::error::pushing mirrored.json failed in pass ${pass}"
+                git rebase --abort 2>/dev/null || true
+              fi
+            fi
+            echo "::endgroup::"
+            if (( SECONDS + INTERVAL_SECONDS >= deadline )); then break; fi
+            sleep "${INTERVAL_SECONDS}"
+          done
+          echo "${pass} pass(es), ${failures} failed"
+          # A failed pass still lets the loop retry, but the run ends red.
+          (( failures == 0 ))
+
+      # Only on main: a test run on another branch must not start a chain there.
+      - name: Start the next run
+        if: ${{ !cancelled() && github.ref_name == 'main' }}
+        run: gh workflow run mirror.yml --repo "${GITHUB_REPOSITORY}" --ref "${GITHUB_REF_NAME}"
