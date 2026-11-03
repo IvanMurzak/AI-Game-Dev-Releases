@@ -1,17 +1,10 @@
 name: Mirror builds
 
-# GitHub runs the `*/5` schedule of a quiet public repo only every 2-10 hours
-# (observed Oct-Nov 2026), while the AI-Game-Dev-App release waits at most
-# ~45 min for this mirror. So one run polls in a loop for about five and a half
-# hours and then starts the next run itself: a run dispatched with GITHUB_TOKEN
-# via workflow_dispatch does start (the documented exception), so no extra
-# token is needed. The schedule stays as a safety net that restarts the chain if
-# a run dies; while a run is looping, a scheduled or manual run waits in the
-# concurrency queue. To mirror right now, cancel the running run and dispatch:
-#   gh run cancel <id> -R IvanMurzak/AI-Game-Dev-Releases
-#   gh workflow run mirror.yml -R IvanMurzak/AI-Game-Dev-Releases
-# A cancelled run does not start the next one, so cancelling (without a
-# dispatch) stops the chain until the next scheduled run.
+# GitHub runs this repo's `*/5` schedule only every 2-10 hours, but the App
+# release waits at most ~45 min for the mirror. So a run polls for ~5.5 h, then
+# dispatches the next run (GITHUB_TOKEN may start workflow_dispatch runs); the
+# schedule only restarts a broken chain. A manual run queues behind a running
+# loop: to mirror right now, `gh run cancel <id>`, then `gh workflow run mirror.yml`.
 
 on:
   schedule:
@@ -21,7 +14,7 @@ on:
       loop_minutes:
         description: "How long this run keeps polling (a test: 3)"
         required: false
-        default: "320"
+        default: "320" # keep equal to the LOOP_MINUTES fallback below
 
 permissions:
   contents: write
