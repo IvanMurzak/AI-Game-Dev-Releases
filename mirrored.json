@@ -1,10 +1,7 @@
 {
-  "committed_at": 1794541203,
+  "committed_at": 1794541475,
   "last_added": [
-    "v0.30.0/AI.Game.Dev-0.30.0-x86_64.AppImage",
-    "v0.30.0/AI.Game.Dev-0.30.0-amd64.deb"
+    "v0.30.0/AI.Game.Dev.Setup.0.30.0.exe"
   ],
-  "last_removed": [
-    "v0.25.15"
-  ]
+  "last_removed": []
 }
