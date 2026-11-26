@@ -1,14 +1,7 @@
 {
-  "committed_at": 1795676378,
+  "committed_at": 1795676534,
   "last_added": [
-    "v0.32.7/AI.Game.Dev-0.32.7-mac.zip",
-    "v0.32.7/AI.Game.Dev-0.32.7-arm64-mac.zip",
-    "v0.32.7/AI.Game.Dev-0.32.7.dmg",
-    "v0.32.7/AI.Game.Dev-0.32.7-arm64.dmg",
-    "v0.32.7/AI.Game.Dev-0.32.7-x86_64.AppImage",
-    "v0.32.7/AI.Game.Dev-0.32.7-amd64.deb"
+    "v0.32.7/AI.Game.Dev.Setup.0.32.7.exe"
   ],
-  "last_removed": [
-    "v0.32.2"
-  ]
+  "last_removed": []
 }
