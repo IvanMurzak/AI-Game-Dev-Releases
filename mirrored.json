@@ -1,7 +1,9 @@
 {
-  "committed_at": 1795691018,
+  "committed_at": 1795813076,
   "last_added": [
-    "v0.32.8/AI.Game.Dev.Setup.0.32.8.exe"
+    "v0.32.8/latest.yml",
+    "v0.32.8/latest-mac.yml",
+    "v0.32.8/latest-linux.yml"
   ],
   "last_removed": []
 }
