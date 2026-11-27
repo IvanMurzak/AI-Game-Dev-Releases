@@ -32,17 +32,31 @@ releaseDate: '2026-11-26T10:47:15.254Z'
 """
 
 
+BASE = "https://github.com/owner/mirror/releases/download/v0.32.8/"
+
+
 class RewriteFeed(unittest.TestCase):
     def test_rewrites_url_and_path_only(self):
-        self.assertEqual(mirror.rewrite_feed(WIN), WIN.replace("AI Game Dev Setup 0.32.8.exe", "AI.Game.Dev.Setup.0.32.8.exe"))
+        self.assertEqual(mirror.rewrite_feed(WIN),
+                         WIN.replace("AI Game Dev Setup 0.32.8.exe", BASE + "AI.Game.Dev.Setup.0.32.8.exe"))
 
     def test_keeps_quotes_sizes_and_blockmap(self):
         out = mirror.rewrite_feed(LINUX)
-        self.assertIn("  - url: 'AI.Game.Dev-0.32.8-amd64.deb'\n", out)
-        self.assertIn("path: AI.Game.Dev-0.32.8-x86_64.AppImage\n", out)
+        self.assertIn(f"  - url: '{BASE}AI.Game.Dev-0.32.8-amd64.deb'\n", out)
+        self.assertIn(f"path: {BASE}AI.Game.Dev-0.32.8-x86_64.AppImage\n", out)
         self.assertIn("    blockMapSize: 775179\n", out)
         self.assertNotIn("AI Game Dev", out)
-        self.assertEqual(len(out), len(LINUX))  # only spaces became dots
+        # only the three url/path values changed: spaces became dots, behind the base URL
+        self.assertEqual(len(out), len(LINUX) + 3 * len(BASE))
+
+    def test_url_is_version_pinned(self):
+        newer = WIN.replace("0.32.8", "0.33.0")
+        self.assertIn("/releases/download/v0.33.0/AI.Game.Dev.Setup.0.33.0.exe\n", mirror.rewrite_feed(newer))
+
+    def test_unsafe_names_refused(self):
+        for name in ["AI Game Dev+1.exe", "a/b.exe", "AI%20Game.exe", "Ünï.exe"]:
+            with self.assertRaisesRegex(ValueError, "only letters"):
+                mirror.rewrite_feed(WIN.replace("AI Game Dev Setup 0.32.8.exe", name))
 
     def test_crlf_kept(self):
         crlf = WIN.replace("\n", "\r\n")
@@ -59,7 +73,7 @@ def release(tag, assets, draft=False, prerelease=False):
 
 
 class MarkLatest(unittest.TestCase):
-    def run_with(self, rels, latest, official=None):
+    def run_with(self, rels, latest, official=None, force=False):
         calls = []
 
         def gh(*args, check=True):
@@ -69,7 +83,7 @@ class MarkLatest(unittest.TestCase):
             return ""
 
         with mock.patch.object(mirror, "gh", gh):
-            marked = mirror.mark_latest(rels, official)
+            marked = mirror.mark_latest(rels, official, force)
         edits = [c for c in calls if c[:2] == ("release", "edit")]
         return marked, edits
 
@@ -88,6 +102,11 @@ class MarkLatest(unittest.TestCase):
     def test_no_latest_release_yet(self):
         self.assertEqual(self.run_with([release("v0.32.8", mirror.FEEDS)], None)[0], "v0.32.8")
 
+    def test_force_pins_even_when_github_already_reports_it(self):
+        marked, edits = self.run_with([release("v0.32.8", mirror.FEEDS)], "v0.32.8", force=True)
+        self.assertEqual(marked, "v0.32.8")
+        self.assertEqual(len(edits), 1)
+
     def test_already_latest_is_left_alone(self):
         self.assertEqual(self.run_with([release("v0.32.8", mirror.FEEDS)], "v0.32.8"), (None, []))
 
@@ -102,9 +121,9 @@ class EnsureRelease(unittest.TestCase):
         with mock.patch.object(mirror, "release_assets", lambda tag: None), \
              mock.patch.object(mirror, "gh", lambda *a, check=True: calls.append(a[:2]) or ""), \
              mock.patch.object(mirror, "list_releases", lambda: ["listing"]), \
-             mock.patch.object(mirror, "mark_latest", lambda rels: calls.append(("mark", rels))):
+             mock.patch.object(mirror, "mark_latest", lambda rels, force: calls.append(("mark", rels, force))):
             self.assertEqual(mirror.ensure_release("v0.33.0", "0.33.0"), {})
-        self.assertEqual(calls, [("release", "create"), ("mark", ["listing"])])
+        self.assertEqual(calls, [("release", "create"), ("mark", ["listing"], True)])
 
 
 class PublishFeeds(unittest.TestCase):
@@ -145,7 +164,7 @@ class PublishFeeds(unittest.TestCase):
 
 class Main(unittest.TestCase):
     def run_main(self, feeds, mirror_file=lambda tag, f, existing: False):
-        published, marked = [], []
+        published, marked = self.published, self.marked = [], []
         with mock.patch.object(mirror, "fetch", lambda url: feeds[url.rsplit("/", 1)[1]].encode()), \
              mock.patch.object(mirror, "ensure_release", lambda tag, version: {}), \
              mock.patch.object(mirror, "mirror_file", mirror_file), \
@@ -172,10 +191,36 @@ class Main(unittest.TestCase):
     def test_unrewritable_feed_still_mirrors_and_marks_but_fails_the_pass(self):
         bad = WIN.replace("path: AI Game Dev Setup", "path: Other Setup")
         mirrored = []
-        published, marked, code = self.run_main({"latest.yml": bad, "latest-mac.yml": WIN, "latest-linux.yml": LINUX},
-                                                lambda tag, f, existing: mirrored.append(f["url"]) or False)
-        self.assertEqual((published, marked, code), ([], ["v0.32.8"], 1))
+        with self.assertRaisesRegex(ValueError, "not one of its files"):
+            self.run_main({"latest.yml": bad, "latest-mac.yml": WIN, "latest-linux.yml": LINUX},
+                          lambda tag, f, existing: mirrored.append(f["url"]) or False)
+        self.assertEqual(self.published, [])
+        self.assertEqual(self.marked, ["v0.32.8"])
         self.assertEqual(len(mirrored), 4)  # every file of every feed was still mirrored
+
+    def test_unsafe_name_refused_before_any_download(self):
+        mirrored = []
+        bad = WIN.replace("AI Game Dev Setup 0.32.8.exe", "AI Game Dev#1.exe")
+        with self.assertRaisesRegex(ValueError, "only letters"):
+            self.run_main({"latest.yml": bad, "latest-mac.yml": WIN, "latest-linux.yml": LINUX},
+                          lambda tag, f, existing: mirrored.append(f["url"]) or True)
+        self.assertNotIn("AI Game Dev#1.exe", mirrored)
+        self.assertEqual(self.marked, [None])
+
+    def test_failed_file_still_mirrors_other_feeds_and_runs_housekeeping(self):
+        mirrored = []
+
+        def mirror_file(tag, f, existing):
+            if f["url"].endswith(".exe"):
+                raise RuntimeError("download cut 3 times")
+            mirrored.append(f["url"])
+            return True
+
+        with self.assertRaisesRegex(RuntimeError, "download cut"):
+            self.run_main({"latest.yml": WIN, "latest-mac.yml": LINUX, "latest-linux.yml": LINUX}, mirror_file)
+        self.assertEqual(len(mirrored), 4)  # both other feeds were still mirrored
+        self.assertEqual(self.published, [])  # a release with a missing file gets no feeds
+        self.assertEqual(self.marked, [None])  # prune + mark_latest still ran
 
 
 if __name__ == "__main__":
