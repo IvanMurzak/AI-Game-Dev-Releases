@@ -5,6 +5,9 @@ name: Mirror builds
 # dispatches the next run (GITHUB_TOKEN may start workflow_dispatch runs); the
 # schedule only restarts a broken chain. A manual run queues behind a running
 # loop: to mirror right now, `gh run cancel <id>`, then `gh workflow run mirror.yml`.
+# Each pass copies the builds, then the rewritten update feeds, and keeps the
+# newest complete release marked latest (.github/scripts/mirror.py docstring).
+# Tests: python3 -m unittest discover -s .github/scripts
 
 on:
   schedule:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Mirror the published AI Game Dev desktop builds from downloads.ai-game.dev into this repo's Releases.
+"""Mirror the published AI Game Dev desktop builds from downloads.ai-game.dev into this repo's
+Releases.
 
 downloads.ai-game.dev (Cloudflare R2) stays the source of truth. This script only copies what the
 update feeds already list, byte for byte, and refuses anything whose size or sha512 does not match
@@ -8,6 +9,14 @@ a slow path to Cloudflare to these assets, and falls back to R2 when an asset is
 
 Asset naming: GitHub turns spaces in an asset name into dots, so every asset is uploaded as
 `name.replace(" ", ".")` under the tag `v<version>`. The Worker applies the same transform.
+
+Update feeds: once every file that all three feeds list for one version is in its release, that
+release also gets `latest.yml`, `latest-mac.yml` and `latest-linux.yml`: the R2 feeds with each
+`url`/`path` rewritten to the absolute, version-pinned asset URL
+`https://github.com/<repo>/releases/download/v<version>/<asset>` (sha512 and size unchanged).
+The release the official feeds name is kept marked latest once it carries all three feeds (until
+then the newest one that does), so `https://github.com/<repo>/releases/latest/download/latest.yml`
+(and -mac, -linux) is an electron-updater generic feed whose files never move with the latest mark.
 """
 from __future__ import annotations
 
@@ -32,6 +41,7 @@ REPO = os.environ["GITHUB_REPOSITORY"]
 UA = {"User-Agent": "ai-game-dev-release-mirror"}
 DOWNLOAD_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 30
+SAFE_NAME = re.compile(r"[A-Za-z0-9 ._-]+")
 
 
 def gh(*args: str, check: bool = True) -> str:
@@ -74,18 +84,50 @@ def parse_feed(text: str) -> tuple[str, list[dict]]:
     return version, files
 
 
-DOWNLOAD_ATTEMPTS = 3
-RETRY_DELAY_SECONDS = 30
+def check_names(files: list[dict]) -> None:
+    """R2 file names the mirror can name and link to: GitHub's asset naming is only known (and
+    applied here) for spaces, and the rewritten URLs are not percent-encoded."""
+    for f in files:
+        if not SAFE_NAME.fullmatch(f["url"]):
+            raise ValueError(f"feed entry {f['url']!r}: only letters, digits, space, '.', '_'"
+                             " and '-' are mirrored")
 
 
 def asset_name(url: str) -> str:
     return url.replace(" ", ".")
 
 
-def release_assets(tag: str) -> dict[str, int] | None:
-    """Uploaded assets by name -> size. An asset left behind by an interrupted upload (state other
-    than "uploaded") is deleted here so the next upload can replace it; otherwise it would block
-    that file forever."""
+def asset_url(tag: str, url: str) -> str:
+    return f"https://github.com/{REPO}/releases/download/{tag}/{asset_name(url)}"
+
+
+def rewrite_feed(text: str) -> str:
+    """The feed with every `url:`/`path:` value that names one of its files replaced by the
+    absolute mirror asset URL of release `v<version>`; every other byte is kept. The result must
+    parse to the same version, sizes and sha512s."""
+    version, files = parse_feed(text)
+    check_names(files)
+    tag = f"v{version}"
+    urls = {f["url"] for f in files}
+
+    def sub(m: re.Match) -> str:
+        key, value = m.group(2), m.group(4)
+        if value not in urls:
+            raise ValueError(f"feed {key} {value!r} is not one of its files")
+        return f"{m.group(1)}{m.group(3)}{asset_url(tag, value)}{m.group(3)}{m.group(5)}"
+
+    out = re.sub(r"(?m)^(\s*(?:-\s+)?(url|path):[ \t]*)(['\"]?)(.*?)\3([ \t]*\r?)$", sub, text)
+    new_version, new_files = parse_feed(out)
+    expected = [{**f, "url": asset_url(tag, f["url"])} for f in files]
+    if new_version != version or new_files != expected:
+        raise ValueError("rewritten feed does not describe the same files")
+    return out
+
+
+def release_assets(tag: str, field: str = "size") -> dict | None:
+    """Uploaded assets by name -> `field` (size, digest, ...); None if no such release. An asset
+    left behind by an interrupted upload (state other than "uploaded") is deleted here so the next
+    upload can replace it; otherwise it would block that file forever."""
     out = gh("release", "view", tag, "--repo", REPO, "--json", "assets", check=False)
     if not out.strip():
         return None
@@ -95,7 +137,7 @@ def release_assets(tag: str) -> dict[str, int] | None:
             gh("release", "delete-asset", tag, a["name"], "--repo", REPO, "--yes")
             print(f"deleted incomplete asset {tag}/{a['name']} (state {a.get('state')})")
             continue
-        assets[a["name"]] = a["size"]
+        assets[a["name"]] = a.get(field)
     return assets
 
 
@@ -147,30 +189,121 @@ def ensure_release(tag: str, version: str) -> dict[str, int]:
         gh("release", "create", tag, "--repo", REPO, "--title", f"AI Game Dev {version}",
            "--notes", f"Mirror of the AI Game Dev {version} desktop builds. Download: https://ai-game.dev/download",
            "--latest=false")
+        # While no release is marked latest explicitly, GitHub treats the newest one as latest even
+        # with --latest=false: pin the complete one explicitly right away, or the latest feeds
+        # would 404 for the whole time this release's files take to copy.
+        mark_latest(list_releases(), force=True)
         existing = {}
     return existing
 
 
-def prune() -> list[str]:
-    out = gh("release", "list", "--repo", REPO, "--limit", "200", "--json", "tagName,createdAt")
-    rels = sorted(json.loads(out), key=lambda r: r["createdAt"], reverse=True)
+def sha256(content: bytes) -> str:
+    """In the form of GitHub's asset `digest`."""
+    return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def publish_feeds(tag: str, feeds: dict[str, bytes]) -> list[str]:
+    """Upload each rewritten feed the release does not already hold byte for byte (by GitHub's
+    sha256 digest), then check the digests again. Only called once every file of the release is
+    mirrored. Returns the feeds uploaded."""
+    have = (release_assets(tag, "digest") or {})
+    todo = {feed: content for feed, content in feeds.items() if have.get(feed) != sha256(content)}
+    if not todo:
+        return []
+    with tempfile.TemporaryDirectory() as d:
+        paths = []
+        for feed, content in todo.items():
+            paths.append(os.path.join(d, feed))
+            with open(paths[-1], "wb") as out:
+                out.write(content)
+        gh("release", "upload", tag, *paths, "--repo", REPO, "--clobber")
+    after = (release_assets(tag, "digest") or {})
+    bad = [feed for feed, content in todo.items() if after.get(feed) != sha256(content)]
+    if bad:
+        raise RuntimeError(f"uploaded {tag} feeds {bad} but the release holds other bytes")
+    print(f"published feeds {tag}: {', '.join(todo)}")
+    return list(todo)
+
+
+def version_key(tag: str) -> tuple[int, ...] | None:
+    m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+    return tuple(map(int, m.groups())) if m else None
+
+
+def list_releases() -> list[dict]:
+    return json.loads(gh("api", f"repos/{REPO}/releases?per_page=100"))
+
+
+def mark_latest(rels: list[dict], official: str | None = None, force: bool = False) -> str | None:
+    """Keep the release the official feeds name marked latest once it carries all three feeds,
+    else the newest release that does (GitHub may pick another one on its own, e.g. after the
+    latest release is deleted or a new one is created). `force` pins it even when GitHub already
+    reports it as latest, which may be only its implicit choice. Returns the tag it marked."""
+    complete = [r["tag_name"] for r in rels
+                if not r["draft"] and not r["prerelease"] and version_key(r["tag_name"])
+                and set(FEEDS) <= {a["name"] for a in r["assets"] if a["state"] == "uploaded"}]
+    if not complete:
+        return None
+    want = official if official in complete else max(complete, key=version_key)
+    latest = gh("api", f"repos/{REPO}/releases/latest", check=False)
+    current = json.loads(latest or "{}").get("tag_name")
+    if current == want and not force:
+        return None
+    gh("release", "edit", want, "--repo", REPO, "--latest")
+    print(f"marked {want} latest (was {current})")
+    return want
+
+
+def prune(rels: list[dict]) -> list[str]:
     removed = []
-    for r in rels[KEEP_VERSIONS:]:
-        gh("release", "delete", r["tagName"], "--repo", REPO, "--yes", "--cleanup-tag")
-        removed.append(r["tagName"])
+    for r in sorted(rels, key=lambda r: r["created_at"], reverse=True)[KEEP_VERSIONS:]:
+        gh("release", "delete", r["tag_name"], "--repo", REPO, "--yes", "--cleanup-tag")
+        removed.append(r["tag_name"])
     return removed
 
 
 def main() -> int:
     changed: list[str] = []
+    feeds: dict[str, tuple[str, str]] = {}
+    errors: list[Exception] = []
     for feed in FEEDS:
-        version, files = parse_feed(fetch(f"{ORIGIN}/{feed}").decode())
-        tag = f"v{version}"
-        existing = ensure_release(tag, version)
-        for f in files:
-            if mirror_file(tag, f, existing):
-                changed.append(f"{tag}/{asset_name(f['url'])}")
-    removed = prune()
+        # A failure in one feed is reported after the other feeds and the housekeeping below ran.
+        try:
+            text = fetch(f"{ORIGIN}/{feed}").decode()
+            version, files = parse_feed(text)
+            check_names(files)
+            tag = f"v{version}"
+            existing = ensure_release(tag, version)
+            for f in files:
+                if mirror_file(tag, f, existing):
+                    changed.append(f"{tag}/{asset_name(f['url'])}")
+            feeds[feed] = (tag, text)
+        except Exception as error:
+            errors.append(error)
+            print(f"::error::{feed}: {error}")
+    # The feed files go up only when every file of all three feeds is mirrored and verified
+    # (mirror_file raises otherwise) and all three name the same release, so a release that
+    # carries feeds holds every platform's files; while a release is still being published on R2,
+    # the previous one stays latest. Replacing a feed that changed (--clobber) deletes the old
+    # asset first, a short 404 on that one file; R2 refuses new bytes under an existing name.
+    tags = {tag for tag, _ in feeds.values()}
+    official = next(iter(tags)) if len(tags) == 1 and len(feeds) == len(FEEDS) else None
+    if official:
+        try:
+            rewritten = {feed: rewrite_feed(text).encode() for feed, (_, text) in feeds.items()}
+            changed += [f"{official}/{feed}" for feed in publish_feeds(official, rewritten)]
+        except Exception as error:
+            errors.append(error)
+            print(f"::error::feeds of {official} not published: {error}")
+    elif not errors:
+        print(f"feeds name different releases {sorted(tags)}; feed files wait")
+    rels = list_releases()
+    removed = prune(rels)
+    marked = mark_latest([r for r in rels if r["tag_name"] not in removed], official)
+    if marked:
+        changed.append(f"{marked} latest")
+    if errors:
+        raise errors[0]
     state_path = "mirrored.json"
     try:
         state = json.load(open(state_path))
