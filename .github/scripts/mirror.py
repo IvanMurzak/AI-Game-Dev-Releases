@@ -11,8 +11,8 @@ Asset naming: GitHub turns spaces in an asset name into dots, so every asset is 
 
 Update feeds: once every file that all three feeds list for one version is in its release, that
 release also gets `latest.yml`, `latest-mac.yml` and `latest-linux.yml`: the R2 feeds with each
-`url`/`path` rewritten to the asset name (sha512 and size unchanged). The newest release that carries
-all three feeds is kept marked latest, so `https://github.com/<repo>/releases/latest/download` works
+`url`/`path` rewritten to the asset name (sha512 and size unchanged). The release the official feeds
+name is kept marked latest once it carries all three feeds (until then the newest one that does), so `https://github.com/<repo>/releases/latest/download` works
 as an electron-updater generic feed base: `<base>/latest.yml` and `<base>/<asset>`.
 """
 from __future__ import annotations
@@ -169,6 +169,10 @@ def ensure_release(tag: str, version: str) -> dict[str, int]:
         gh("release", "create", tag, "--repo", REPO, "--title", f"AI Game Dev {version}",
            "--notes", f"Mirror of the AI Game Dev {version} desktop builds. Download: https://ai-game.dev/download",
            "--latest=false")
+        # While no release is marked latest explicitly, GitHub treats the newest one as latest even
+        # with --latest=false: pin the complete one again right away, or `releases/latest/download`
+        # would 404 for the whole time this release's files take to copy.
+        mark_latest(list_releases())
         existing = {}
     return existing
 
@@ -215,15 +219,16 @@ def list_releases() -> list[dict]:
     return json.loads(gh("api", f"repos/{REPO}/releases?per_page=100"))
 
 
-def mark_latest(rels: list[dict]) -> str | None:
-    """Keep the newest release that carries all three feeds marked latest (GitHub may pick another
-    one on its own, e.g. after the latest release is deleted). Returns the tag it marked, if any."""
+def mark_latest(rels: list[dict], official: str | None = None) -> str | None:
+    """Keep the release the official feeds name marked latest once it carries all three feeds, else
+    the newest release that does (GitHub may pick another one on its own, e.g. after the latest
+    release is deleted or a new one is created). Returns the tag it marked, if any."""
     complete = [r["tag_name"] for r in rels
                 if not r["draft"] and not r["prerelease"] and version_key(r["tag_name"])
                 and set(FEEDS) <= {a["name"] for a in r["assets"] if a["state"] == "uploaded"}]
     if not complete:
         return None
-    want = max(complete, key=version_key)
+    want = official if official in complete else max(complete, key=version_key)
     current = json.loads(gh("api", f"repos/{REPO}/releases/latest", check=False) or "{}").get("tag_name")
     if current == want:
         return None
@@ -242,7 +247,7 @@ def prune(rels: list[dict]) -> list[str]:
 
 def main() -> int:
     changed: list[str] = []
-    feeds: dict[str, tuple[str, bytes]] = {}
+    feeds: dict[str, tuple[str, str]] = {}
     for feed in FEEDS:
         text = fetch(f"{ORIGIN}/{feed}").decode()
         version, files = parse_feed(text)
@@ -251,20 +256,30 @@ def main() -> int:
         for f in files:
             if mirror_file(tag, f, existing):
                 changed.append(f"{tag}/{asset_name(f['url'])}")
-        feeds[feed] = (tag, rewrite_feed(text).encode())
+        feeds[feed] = (tag, text)
     # Every file of every feed is mirrored and verified at this point (mirror_file raises
     # otherwise). The feeds go up only when all three name the same release, so a release that
     # carries feeds holds every platform's files; while a release is still being published on R2,
     # the previous one stays latest.
+    # A feed the rewrite refuses fails the pass (red run) but never stops the mirroring above or
+    # the housekeeping below. Replacing a feed that changed (--clobber) deletes the old asset first,
+    # a short 404 on that one file; R2 refuses new bytes under an existing name, so it is rare.
     tags = {tag for tag, _ in feeds.values()}
-    if len(tags) == 1:
-        tag = tags.pop()
-        changed += [f"{tag}/{feed}" for feed in publish_feeds(tag, {f: c for f, (_, c) in feeds.items()})]
+    official = next(iter(tags)) if len(tags) == 1 else None
+    feed_error = False
+    if official:
+        try:
+            rewritten = {feed: rewrite_feed(text).encode() for feed, (_, text) in feeds.items()}
+        except ValueError as error:
+            feed_error = True
+            print(f"::error::feeds of {official} not published: {error}")
+        else:
+            changed += [f"{official}/{feed}" for feed in publish_feeds(official, rewritten)]
     else:
         print(f"feeds name different releases {sorted(tags)}; feed files wait")
     rels = list_releases()
     removed = prune(rels)
-    marked = mark_latest([r for r in rels if r["tag_name"] not in removed])
+    marked = mark_latest([r for r in rels if r["tag_name"] not in removed], official)
     if marked:
         changed.append(f"{marked} latest")
     state_path = "mirrored.json"
@@ -286,7 +301,7 @@ def main() -> int:
             o.write("state_changed=true\n")
     else:
         print("nothing to mirror")
-    return 0
+    return 1 if feed_error else 0
 
 
 if __name__ == "__main__":
