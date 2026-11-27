@@ -1,9 +1,10 @@
 {
-  "committed_at": 1795813076,
+  "committed_at": 1795819902,
   "last_added": [
-    "v0.32.8/latest.yml",
-    "v0.32.8/latest-mac.yml",
-    "v0.32.8/latest-linux.yml"
+    "v0.32.9/AI.Game.Dev-0.32.9-x86_64.AppImage",
+    "v0.32.9/AI.Game.Dev-0.32.9-amd64.deb"
   ],
-  "last_removed": []
+  "last_removed": [
+    "v0.32.4"
+  ]
 }
