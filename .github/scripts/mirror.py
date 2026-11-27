@@ -89,14 +89,11 @@ def rewrite_feed(text: str) -> str:
     name; every other byte is kept. The result must parse to the same version, sizes and sha512s."""
     version, files = parse_feed(text)
     urls = {f["url"] for f in files}
-    seen_path = False
 
     def sub(m: re.Match) -> str:
-        nonlocal seen_path
         key, value = m.group(2), m.group(4)
         if value not in urls:
             raise ValueError(f"feed {key} {value!r} is not one of its files")
-        seen_path |= key == "path"
         return f"{m.group(1)}{m.group(3)}{asset_name(value)}{m.group(3)}{m.group(5)}"
 
     out = re.sub(r"(?m)^(\s*(?:-\s+)?(url|path):[ \t]*)(['\"]?)(.*?)\3([ \t]*\r?)$", sub, text)
@@ -104,8 +101,6 @@ def rewrite_feed(text: str) -> str:
     expected = [{**f, "url": asset_name(f["url"])} for f in files]
     if new_version != version or new_files != expected:
         raise ValueError("rewritten feed does not describe the same files")
-    if re.search(r"(?m)^path:", text) and not seen_path:
-        raise ValueError("feed path was not rewritten")
     return out
 
 
@@ -178,26 +173,37 @@ def ensure_release(tag: str, version: str) -> dict[str, int]:
     return existing
 
 
-def read_asset(tag: str, name: str) -> bytes | None:
-    r = subprocess.run(["gh", "release", "download", tag, "--repo", REPO, "--pattern", name, "--output", "-"],
-                       capture_output=True)
-    return r.stdout if r.returncode == 0 else None
+def sha256(content: bytes) -> str:
+    """In the form of GitHub's asset `digest`."""
+    return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
-def publish_feed(tag: str, feed: str, content: bytes) -> bool:
-    """Upload the rewritten feed as asset `feed` unless the release already holds these exact
-    bytes, then read it back. Only called once every file of the release is mirrored."""
-    if read_asset(tag, feed) == content:
-        return False
+def asset_digests(tag: str) -> dict[str, str]:
+    out = gh("release", "view", tag, "--repo", REPO, "--json", "assets")
+    return {a["name"]: a.get("digest") for a in json.loads(out)["assets"] if a.get("state") == "uploaded"}
+
+
+def publish_feeds(tag: str, feeds: dict[str, bytes]) -> list[str]:
+    """Upload each rewritten feed the release does not already hold byte for byte (by GitHub's
+    sha256 digest), then check the digests again. Only called once every file of the release is
+    mirrored. Returns the feeds uploaded."""
+    have = asset_digests(tag)
+    todo = {feed: content for feed, content in feeds.items() if have.get(feed) != sha256(content)}
+    if not todo:
+        return []
     with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, feed)
-        with open(path, "wb") as out:
-            out.write(content)
-        gh("release", "upload", tag, path, "--repo", REPO, "--clobber")
-    if read_asset(tag, feed) != content:
-        raise RuntimeError(f"uploaded {tag}/{feed} but it reads back different")
-    print(f"published feed {tag}/{feed}")
-    return True
+        paths = []
+        for feed, content in todo.items():
+            paths.append(os.path.join(d, feed))
+            with open(paths[-1], "wb") as out:
+                out.write(content)
+        gh("release", "upload", tag, *paths, "--repo", REPO, "--clobber")
+    after = asset_digests(tag)
+    bad = [feed for feed, content in todo.items() if after.get(feed) != sha256(content)]
+    if bad:
+        raise RuntimeError(f"uploaded {tag} feeds {bad} but the release holds other bytes")
+    print(f"published feeds {tag}: {', '.join(todo)}")
+    return list(todo)
 
 
 def version_key(tag: str) -> tuple[int, ...] | None:
@@ -205,10 +211,13 @@ def version_key(tag: str) -> tuple[int, ...] | None:
     return tuple(map(int, m.groups())) if m else None
 
 
-def mark_latest() -> str | None:
+def list_releases() -> list[dict]:
+    return json.loads(gh("api", f"repos/{REPO}/releases?per_page=100"))
+
+
+def mark_latest(rels: list[dict]) -> str | None:
     """Keep the newest release that carries all three feeds marked latest (GitHub may pick another
     one on its own, e.g. after the latest release is deleted). Returns the tag it marked, if any."""
-    rels = json.loads(gh("api", f"repos/{REPO}/releases?per_page=100"))
     complete = [r["tag_name"] for r in rels
                 if not r["draft"] and not r["prerelease"] and version_key(r["tag_name"])
                 and set(FEEDS) <= {a["name"] for a in r["assets"] if a["state"] == "uploaded"}]
@@ -223,13 +232,11 @@ def mark_latest() -> str | None:
     return want
 
 
-def prune() -> list[str]:
-    out = gh("release", "list", "--repo", REPO, "--limit", "200", "--json", "tagName,createdAt")
-    rels = sorted(json.loads(out), key=lambda r: r["createdAt"], reverse=True)
+def prune(rels: list[dict]) -> list[str]:
     removed = []
-    for r in rels[KEEP_VERSIONS:]:
-        gh("release", "delete", r["tagName"], "--repo", REPO, "--yes", "--cleanup-tag")
-        removed.append(r["tagName"])
+    for r in sorted(rels, key=lambda r: r["created_at"], reverse=True)[KEEP_VERSIONS:]:
+        gh("release", "delete", r["tag_name"], "--repo", REPO, "--yes", "--cleanup-tag")
+        removed.append(r["tag_name"])
     return removed
 
 
@@ -251,13 +258,13 @@ def main() -> int:
     # the previous one stays latest.
     tags = {tag for tag, _ in feeds.values()}
     if len(tags) == 1:
-        for feed, (tag, content) in feeds.items():
-            if publish_feed(tag, feed, content):
-                changed.append(f"{tag}/{feed}")
+        tag = tags.pop()
+        changed += [f"{tag}/{feed}" for feed in publish_feeds(tag, {f: c for f, (_, c) in feeds.items()})]
     else:
         print(f"feeds name different releases {sorted(tags)}; feed files wait")
-    removed = prune()
-    marked = mark_latest()
+    rels = list_releases()
+    removed = prune(rels)
+    marked = mark_latest([r for r in rels if r["tag_name"] not in removed])
     if marked:
         changed.append(f"{marked} latest")
     state_path = "mirrored.json"

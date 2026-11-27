@@ -64,14 +64,12 @@ class MarkLatest(unittest.TestCase):
 
         def gh(*args, check=True):
             calls.append(args)
-            if args[:2] == ("api", "repos/owner/mirror/releases?per_page=100"):
-                return json.dumps(rels)
             if args[:2] == ("api", "repos/owner/mirror/releases/latest"):
                 return json.dumps({"tag_name": latest}) if latest else '{"message":"Not Found"}'
             return ""
 
         with mock.patch.object(mirror, "gh", gh):
-            marked = mirror.mark_latest()
+            marked = mirror.mark_latest(rels)
         edits = [c for c in calls if c[:2] == ("release", "edit")]
         return marked, edits
 
@@ -90,15 +88,51 @@ class MarkLatest(unittest.TestCase):
         self.assertEqual(self.run_with(rels, None), (None, []))
 
 
+class PublishFeeds(unittest.TestCase):
+    def run_with(self, held, stored):
+        """held: digests before the upload; stored: digests GitHub shows after it."""
+        views = iter([held, stored])
+        uploads = []
+
+        def gh(*args, check=True):
+            if args[:2] == ("release", "view"):
+                return json.dumps({"assets": [{"name": n, "state": "uploaded", "digest": d}
+                                              for n, d in next(views).items()]})
+            if args[:2] == ("release", "upload"):
+                uploads.append([os.path.basename(p) for p in args[3:-3]])
+                for p in args[3:-3]:
+                    self.assertEqual(open(p, "rb").read(), feeds[os.path.basename(p)])
+            return ""
+
+        feeds = {"latest.yml": b"a", "latest-mac.yml": b"b"}
+        with mock.patch.object(mirror, "gh", gh):
+            return mirror.publish_feeds("v1.0.0", feeds), uploads
+
+    def test_uploads_only_feeds_that_differ_and_checks_digests(self):
+        a, b = mirror.sha256(b"a"), mirror.sha256(b"b")
+        self.assertEqual(self.run_with({"latest.yml": a, "latest-mac.yml": "sha256:old"},
+                                       {"latest.yml": a, "latest-mac.yml": b}),
+                         (["latest-mac.yml"], [["latest-mac.yml"]]))
+
+    def test_unchanged_feeds_upload_nothing(self):
+        held = {"latest.yml": mirror.sha256(b"a"), "latest-mac.yml": mirror.sha256(b"b")}
+        self.assertEqual(self.run_with(held, held), ([], []))
+
+    def test_digest_mismatch_after_upload_fails(self):
+        with self.assertRaises(RuntimeError):
+            self.run_with({}, {"latest.yml": mirror.sha256(b"a")})
+
+
 class Main(unittest.TestCase):
     def run_main(self, feeds):
         published = []
         with mock.patch.object(mirror, "fetch", lambda url: feeds[url.rsplit("/", 1)[1]].encode()), \
              mock.patch.object(mirror, "ensure_release", lambda tag, version: {}), \
              mock.patch.object(mirror, "mirror_file", lambda tag, f, existing: False), \
-             mock.patch.object(mirror, "publish_feed", lambda tag, feed, content: published.append((tag, feed, content)) or True), \
-             mock.patch.object(mirror, "prune", lambda: []), \
-             mock.patch.object(mirror, "mark_latest", lambda: None), \
+             mock.patch.object(mirror, "publish_feeds", lambda tag, fs: published.extend((tag, f, c) for f, c in fs.items()) or list(fs)), \
+             mock.patch.object(mirror, "list_releases", lambda: []), \
+             mock.patch.object(mirror, "prune", lambda rels: []), \
+             mock.patch.object(mirror, "mark_latest", lambda rels: None), \
              mock.patch("builtins.open", mock.mock_open(read_data="{}")), \
              mock.patch.object(mirror.os, "replace"):
             mirror.main()
