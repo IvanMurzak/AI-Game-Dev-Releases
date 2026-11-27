@@ -1,7 +1,14 @@
 {
-  "committed_at": 1795820052,
+  "committed_at": 1795820416,
   "last_added": [
-    "v0.32.9/AI.Game.Dev.Setup.0.32.9.exe"
+    "v0.32.9/AI.Game.Dev-0.32.9-mac.zip",
+    "v0.32.9/AI.Game.Dev-0.32.9-arm64-mac.zip",
+    "v0.32.9/AI.Game.Dev-0.32.9.dmg",
+    "v0.32.9/AI.Game.Dev-0.32.9-arm64.dmg",
+    "v0.32.9/latest.yml",
+    "v0.32.9/latest-mac.yml",
+    "v0.32.9/latest-linux.yml",
+    "v0.32.9 latest"
   ],
   "last_removed": []
 }
