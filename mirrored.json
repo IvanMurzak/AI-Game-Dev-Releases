@@ -1,14 +1,14 @@
 {
-  "committed_at": 1795820416,
+  "committed_at": 1795839463,
   "last_added": [
-    "v0.32.9/AI.Game.Dev-0.32.9-mac.zip",
-    "v0.32.9/AI.Game.Dev-0.32.9-arm64-mac.zip",
-    "v0.32.9/AI.Game.Dev-0.32.9.dmg",
-    "v0.32.9/AI.Game.Dev-0.32.9-arm64.dmg",
-    "v0.32.9/latest.yml",
-    "v0.32.9/latest-mac.yml",
-    "v0.32.9/latest-linux.yml",
-    "v0.32.9 latest"
+    "v0.33.0/AI.Game.Dev-0.33.0-mac.zip",
+    "v0.33.0/AI.Game.Dev-0.33.0-arm64-mac.zip",
+    "v0.33.0/AI.Game.Dev-0.33.0.dmg",
+    "v0.33.0/AI.Game.Dev-0.33.0-arm64.dmg",
+    "v0.33.0/AI.Game.Dev-0.33.0-x86_64.AppImage",
+    "v0.33.0/AI.Game.Dev-0.33.0-amd64.deb"
   ],
-  "last_removed": []
+  "last_removed": [
+    "v0.32.5"
+  ]
 }
